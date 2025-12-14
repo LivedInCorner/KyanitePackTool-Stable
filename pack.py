@@ -116,12 +116,13 @@ def open_file_location(path):
     else:
         subprocess.call(["xdg-open", path])
 
-def start_processing_conversion(pack_format2, progress_callback=None):
+def start_processing_conversion(pack_format2, progress_callback=None, file_paths=None):
     """
     开始处理材质包转换
     """
     # 自动获取源版本的 pack_format
-    file_paths = selected_files.get()
+    if file_paths is None:
+        file_paths = selected_files.get()
     processed_files = []
     all_files_to_process = []
     # 存储文件与原始拖放路径的映射关系
@@ -220,7 +221,8 @@ def start_processing_conversion(pack_format2, progress_callback=None):
     global_last_processed_files = processed_files
     
     log(f"批量处理完成，成功转换 {len(processed_files)} 个文件")
-    display_multiple_results(processed_files, pack_format2, message_type="conversion")
+    # 不调用display_multiple_results，返回处理结果给调用者
+    return processed_files
 
 def get_pack_format(temp_dir):
     """
@@ -298,6 +300,8 @@ PACK_FORMAT_MAP = {
     55: "1.21.5",
     63: "1.21.6",
     64: "1.21.7-1.21.8",
+    69: "1.21.9-1.21.10",
+    75: "1.21.11",
     
 }
 
@@ -323,6 +327,8 @@ PACK_FORMAT_MAP2 = {
     55: "1.21.5",
     63: "1.21.6",
     64: "1.21.7-1.21.8",
+    69: "1.21.9-1.21.10",
+    75: "1.21.11",
     
 }
 
@@ -2232,7 +2238,7 @@ def adjust_hue_brightness(img, hue_shift=0, brightness_shift=0, saturation_shift
 
 def adjust_copper_color(img):
     """
-    专门为铜材质设计的颜色调整函数，确保效果明显
+    专门为铜材质设计的颜色调整函数，确保效果明显（更偏红棕色）
     """
     log("执行铜材质专用颜色调整")
     img = img.convert("RGBA")
@@ -2244,11 +2250,11 @@ def adjust_copper_color(img):
         for x in range(width):
             r, g, b, a = pixels[x, y]
             if a > 0:  # 只处理不透明的像素
-                # 直接修改RGB值，确保铜材质的黄色调
-                # 增加红色和绿色分量，减少蓝色分量，创建黄铜色效果
-                new_r = min(255, int(r * 1.2 + 20))  # 增加红色
-                new_g = min(255, int(g * 1.1 + 10))  # 稍微增加绿色
-                new_b = max(0, int(b * 0.7))          # 减少蓝色
+                # 修改RGB值，创建更自然的铜色（稍微偏红棕色）
+                # 适度增加红色分量，适度降低绿色分量，适度降低蓝色分量
+                new_r = min(255, int(r * 1.15 + 25))  # 适度增加红色，使铜稍微红一点
+                new_g = max(0, int(g * 0.8 - 10))     # 适度减少绿色，避免金色
+                new_b = max(0, int(b * 0.5 - 15))     # 适度减少蓝色，增强铜色
                 
                 if (new_r, new_g, new_b) != (r, g, b):
                     changed_pixels += 1
@@ -5116,11 +5122,12 @@ def clean_non_json_content(content):
         return None
 
 def extract_zip(zip_path):
+    import tempfile
     log(f"Extracting zip: {zip_path}")
+    temp_dir = None
     try:
-        temp_dir = 'temp_extract'
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        # 创建唯一的临时目录
+        temp_dir = tempfile.mkdtemp(prefix='mcpack_', suffix='_temp')
         os.makedirs(temp_dir, exist_ok=True)
 
         # 使用二进制模式打开ZIP文件，避免文件名编码问题
@@ -5239,9 +5246,13 @@ def extract_zip(zip_path):
     except PermissionError as e:
         log(f"Error extracting zip '{zip_path}': Permission denied. {e}")
         traceback.print_exc()
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         return None
     except Exception as e:
         log(f"Error extracting zip '{zip_path}': {e}")
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         traceback.print_exc()
         return None
 
@@ -6781,85 +6792,85 @@ def generate_copper_block(temp_dir):
         if os.path.exists(iron_block_path):
             width, height = Image.open(iron_block_path).size
             
-            # 1. 普通铜方块 - 黄铜色
+            # 定义不同氧化阶段的颜色（按照氧化程度依次变青）
+            colors = {
+                'copper': None,  # 使用默认的铜色调整函数
+                'exposed': (100, 180, 160, 255),  # 轻度氧化 - 浅青绿色
+                'weathered': (70, 190, 180, 255),  # 中度氧化 - 中等青色
+                'oxidized': (50, 210, 210, 255)   # 重度氧化 - 纯青色
+            }
+            
+            # 1. 普通铜方块 - 使用铜色调整函数
             copper_block_path = os.path.join(blocks_path, 'copper_block.png')
             shutil.copy(iron_block_path, copper_block_path)
             copper_img = Image.open(copper_block_path).convert("RGBA")
             
-            # 使用专门的铜材质颜色调整函数，确保效果明显
+            # 使用专门的铜材质颜色调整函数
             copper_img = adjust_copper_color(copper_img)
             copper_img.save(copper_block_path)
-            log(f"Generated 'copper_block.png' with brass color")
+            log(f"Generated 'copper_block.png' with copper color")
             
-            # 2. 轻度氧化铜方块 - 黄铜色为主，部分像素为青色
+            # 2. 轻度氧化铜方块 - 浅青绿色调，保留纹理细节
             exposed_copper_path = os.path.join(blocks_path, 'exposed_copper.png')
             shutil.copy(iron_block_path, exposed_copper_path)
             exposed_img = Image.open(exposed_copper_path).convert("RGBA")
             exposed_pixels = exposed_img.load()
             
-            # 使用专门的铜材质颜色调整函数，确保效果明显
+            # 首先应用铜色调整
             exposed_img = adjust_copper_color(exposed_img)
             
-            # 定义要变为青色的像素块位置（基于方块纹理的典型布局）
-            # 假设方块纹理是由9个像素块组成的3x3网格
-            block_size = width // 3
-            oxidized_blocks = [(0, 0), (2, 2)]  # 左上角和右下角的像素块变为青色
-            
+            # 然后将整体颜色调整为浅青绿色
             for y in range(height):
                 for x in range(width):
                     r, g, b, a = exposed_pixels[x, y]
                     if a > 0:
-                        # 确定当前像素属于哪个3x3网格中的块
-                        block_x = x // block_size
-                        block_y = y // block_size
-                        
-                        if (block_x, block_y) in oxidized_blocks:
-                            # 变为青色
-                            exposed_pixels[x, y] = (50, 200, 200, a)  # 青色
+                        # 应用浅青绿色调
+                        new_r = int(r * 0.8 + colors['exposed'][0] * 0.2)
+                        new_g = int(g * 0.7 + colors['exposed'][1] * 0.3)
+                        new_b = int(b * 0.6 + colors['exposed'][2] * 0.4)
+                        exposed_pixels[x, y] = (min(255, new_r), min(255, new_g), min(255, new_b), a)
             
             exposed_img.save(exposed_copper_path)
-            log(f"Generated 'exposed_copper.png' with brass color and some cyan pixels")
+            log(f"Generated 'exposed_copper.png' with light cyan-green color")
             
-            # 3. 中度氧化铜方块 - 黄铜色和青色混合，不均匀分布
+            # 3. 中度氧化铜方块 - 中等青色，纹理细节较少
             weathered_copper_path = os.path.join(blocks_path, 'weathered_copper.png')
             shutil.copy(iron_block_path, weathered_copper_path)
             weathered_img = Image.open(weathered_copper_path).convert("RGBA")
             weathered_pixels = weathered_img.load()
             
-            # 使用专门的铜材质颜色调整函数，确保效果明显
+            # 首先应用铜色调整
             weathered_img = adjust_copper_color(weathered_img)
             
-            # 创建一个不均匀的掩码，约60%的区域是青色
-            import random
-            random.seed(42)  # 设置随机种子以确保结果可重现
-            
+            # 然后将整体颜色调整为中等青色
             for y in range(height):
                 for x in range(width):
                     r, g, b, a = weathered_pixels[x, y]
                     if a > 0:
-                        # 随机决定是否变为青色，概率为0.6
-                        if random.random() < 0.6:
-                            # 变为青色
-                            weathered_pixels[x, y] = (50, 200, 200, a)  # 青色
+                        # 应用中等青色调
+                        new_r = int(r * 0.6 + colors['weathered'][0] * 0.4)
+                        new_g = int(g * 0.5 + colors['weathered'][1] * 0.5)
+                        new_b = int(b * 0.4 + colors['weathered'][2] * 0.6)
+                        weathered_pixels[x, y] = (min(255, new_r), min(255, new_g), min(255, new_b), a)
             
             weathered_img.save(weathered_copper_path)
-            log(f"Generated 'weathered_copper.png' with mixed brass and cyan colors (uneven distribution)")
+            log(f"Generated 'weathered_copper.png' with medium cyan color")
             
-            # 4. 重度氧化铜方块 - 全青色
+            # 4. 重度氧化铜方块 - 纯青色，只有一个颜色
             oxidized_copper_path = os.path.join(blocks_path, 'oxidized_copper.png')
             shutil.copy(iron_block_path, oxidized_copper_path)
             oxidized_img = Image.open(oxidized_copper_path).convert("RGBA")
             oxidized_pixels = oxidized_img.load()
             
+            # 直接设置为纯青色，不保留纹理细节
             for y in range(height):
                 for x in range(width):
                     r, g, b, a = oxidized_pixels[x, y]
                     if a > 0:
-                        # 全部变为青色
-                        oxidized_pixels[x, y] = (50, 200, 200, a)  # 青色
+                        oxidized_pixels[x, y] = colors['oxidized']  # 纯青色
             
             oxidized_img.save(oxidized_copper_path)
-            log(f"Generated 'oxidized_copper.png' with full cyan color")
+            log(f"Generated 'oxidized_copper.png' with full pure cyan color")
             
             # 复制 .mcmeta 文件（如果存在）
             iron_block_mcmeta_path = iron_block_path + '.mcmeta'
@@ -6874,6 +6885,116 @@ def generate_copper_block(temp_dir):
     except Exception as e:
         log(f"Error processing 'iron_block.png': {e}")
         traceback.print_exc()
+
+def generate_copper_tools(temp_dir):
+    log(f"Processing and copying copper tools/items in: {temp_dir}")
+    items_path_new = os.path.join(temp_dir, 'assets', 'minecraft', 'textures', 'item')
+    items_to_copy_and_process = [
+        'iron_sword', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots',
+        'iron_axe', 'iron_pickaxe', 'iron_shovel', 'iron_hoe', 'iron_horse_armor'
+    ]
+    # 备选材质列表，按优先级排序
+    # 注意：不同材质的命名可能有所不同，需要确保使用正确的文件名格式
+    alternative_materials = ['diamond', 'golden', 'stone', 'netherite']
+    
+    for item in items_to_copy_and_process:
+        try:
+            original_path = os.path.join(items_path_new, f'{item}.png')
+            new_path = os.path.join(items_path_new, f'copper_{item[5:]}.png')
+            
+            # 检查原始铁材质是否存在
+            if os.path.exists(original_path):
+                shutil.copy(original_path, new_path)
+                log(f"Copied and renamed '{item}.png' to 'copper_{item[5:]}.png'")
+            else:
+                log(f"'{item}.png' does not exist, trying alternative materials...")
+                # 尝试使用备选材质
+                found_alternative = False
+                for material in alternative_materials:
+                    # 根据材质类型使用正确的文件名格式
+                    if material == 'golden':
+                        alt_material = 'gold'  # 金色工具使用'gold'而不是'golden'
+                    else:
+                        alt_material = material
+                    
+                    alt_item = f'{alt_material}_{item[5:]}'
+                    alt_path = os.path.join(items_path_new, f'{alt_item}.png')
+                    if os.path.exists(alt_path):
+                        shutil.copy(alt_path, new_path)
+                        log(f"Copied and renamed '{alt_item}.png' to 'copper_{item[5:]}.png' as alternative")
+                        found_alternative = True
+                        break
+                
+                if not found_alternative:
+                    log(f"No suitable alternative found for '{item}.png', skipping...")
+                    continue
+            
+            # 使用铜材质专用的颜色调整函数
+            img = Image.open(new_path).convert("RGBA")
+            img = adjust_copper_color(img)
+            img.save(new_path)
+            log(f"Processed copper image 'copper_{item[5:]}.png'")
+
+            # 复制mcmeta文件（如果存在）
+            original_meta_path = original_path + '.mcmeta'
+            new_meta_path = new_path + '.mcmeta'
+            if os.path.exists(original_meta_path):
+                shutil.copy(original_meta_path, new_meta_path)
+                log(f"Copied and renamed '{item}.png.mcmeta' to 'copper_{item[5:]}.png.mcmeta'")
+
+        except Exception as e:
+            log(f"Error processing and copying copper item '{item}': {e}")
+            traceback.print_exc()
+
+
+def generate_copper_armor_models(temp_dir):
+    log(f"Processing copper armor layers in: {temp_dir}")
+    armor_path = os.path.join(temp_dir, 'assets', 'minecraft', 'textures', 'models', 'armor')
+    armor_files = ['iron_layer_1.png', 'iron_layer_2.png']
+    # 备选材质列表，按优先级排序
+    # 注意：不同材质的命名可能有所不同，需要确保使用正确的文件名格式
+    alternative_materials = ['diamond', 'golden', 'chainmail', 'leather']
+    
+    for armor_file in armor_files:
+        try:
+            original_path = os.path.join(armor_path, armor_file)
+            new_path = os.path.join(armor_path, armor_file.replace('iron', 'copper'))
+            
+            # 检查原始铁材质是否存在
+            if os.path.exists(original_path):
+                shutil.copy(original_path, new_path)
+                log(f"Copied and renamed '{armor_file}' to '{armor_file.replace('iron', 'copper')}'")
+            else:
+                log(f"'{original_path}' does not exist, trying alternative materials...")
+                # 尝试使用备选材质
+                found_alternative = False
+                for material in alternative_materials:
+                    # 根据材质类型使用正确的文件名格式
+                    if material == 'golden':
+                        alt_file = armor_file.replace('iron', 'gold')  # 金色盔甲使用'gold'而不是'golden'
+                    else:
+                        alt_file = armor_file.replace('iron', material)
+                    
+                    alt_path = os.path.join(armor_path, alt_file)
+                    if os.path.exists(alt_path):
+                        shutil.copy(alt_path, new_path)
+                        log(f"Copied and renamed '{alt_file}' to '{armor_file.replace('iron', 'copper')}' as alternative")
+                        found_alternative = True
+                        break
+                
+                if not found_alternative:
+                    log(f"No suitable alternative found for '{armor_file}', skipping...")
+                    continue
+            
+            # 使用铜材质专用的颜色调整函数
+            img = Image.open(new_path).convert("RGBA")
+            img = adjust_copper_color(img)
+            img.save(new_path)
+            log(f"Processed copper armor image '{armor_file.replace('iron', 'copper')}'")
+        except Exception as e:
+            log(f"Error processing and copying copper armor layer '{armor_file}': {e}")
+            traceback.print_exc()
+
 
 def delete_enchanted_item_glint(temp_dir):
     log(f"Deleting enchanted item glint in: {temp_dir}")
@@ -7107,61 +7228,10 @@ def generate_smithing_ui(temp_dir):
         log(f"Error processing smithing image in '{temp_dir}': {e}") 
         traceback.print_exc()
 
-def generate_copper_tools(temp_dir):
-    log(f"Processing and copying copper items in: {temp_dir}")
-    items_path_new = os.path.join(temp_dir, 'assets', 'minecraft', 'textures', 'item')
-    items_to_copy_and_process = [
-        'iron_sword', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots',
-        'iron_axe', 'iron_pickaxe', 'iron_shovel', 'iron_hoe'
-    ]
-    for item in items_to_copy_and_process:
-        try:
-            original_path = os.path.join(items_path_new, f'{item}.png')
-            new_path = os.path.join(items_path_new, f'copper_{item[5:]}.png')
-            if os.path.exists(original_path):
-                shutil.copy(original_path, new_path)
-                log(f"Copied and renamed '{item}.png' to 'copper_{item[5:]}.png'")
-                
-                # 使用专门的铜材质颜色调整函数，确保效果明显
-                img = Image.open(new_path).convert("RGBA")
-                img = adjust_copper_color(img)
-                img.save(new_path)
-                log(f"Processed image 'copper_{item[5:]}.png' to brass color")
-
-                original_meta_path = original_path + '.mcmeta'
-                new_meta_path = new_path + '.mcmeta'
-                if os.path.exists(original_meta_path):
-                    shutil.copy(original_meta_path, new_meta_path)
-                    log(f"Copied and renamed '{item}.png.mcmeta' to 'copper_{item[5:]}.png.mcmeta'")
-
-        except Exception as e:
-            log(f"Error processing and copying item '{item}': {e}")
-            traceback.print_exc()
 
 
-def generate_copper_armor_models(temp_dir):
-    log(f"Processing copper armor layers in: {temp_dir}")
-    armor_path = os.path.join(temp_dir, 'assets', 'minecraft', 'textures', 'models', 'armor')
-    armor_files = ['iron_layer_1.png', 'iron_layer_2.png']
-    for armor_file in armor_files:
-        try:
-            original_path = os.path.join(armor_path, armor_file)
-            new_path = os.path.join(armor_path, armor_file.replace('iron', 'copper'))
-            log(f"Checking if {original_path} exists.")
-            if os.path.exists(original_path):
-                shutil.copy(original_path, new_path)
-                log(f"Copied and renamed '{armor_file}' to '{armor_file.replace('iron', 'copper')}'")
-                
-                # 使用专门的铜材质颜色调整函数，确保效果明显
-                img = Image.open(new_path).convert("RGBA")
-                img = adjust_copper_color(img)
-                img.save(new_path)
-                log(f"Processed image '{armor_file.replace('iron', 'copper')}' to brass color")
-            else:
-                log(f"'{original_path}' does not exist.")
-        except Exception as e:
-            log(f"Error processing and copying armor layer '{armor_file}': {e}")
-            traceback.print_exc()
+
+
 
 
 def generate_redwood_cherry_bamboo_planks(temp_dir):
@@ -7688,6 +7758,7 @@ def fix_armor_models(temp_dir):
                 'leather_layer_1.png': 'leather.png',
                 'leather_layer_1_overlay.png': 'leather_overlay.png',
                 'netherite_layer_1.png': 'netherite.png',
+                'copper_layer_1.png': 'copper.png',  # 添加铜盔甲层1
             }
         },
         'layer_2': {
@@ -7701,6 +7772,7 @@ def fix_armor_models(temp_dir):
                 'leather_layer_2.png': 'leather.png',
                 'leather_layer_2_overlay.png': 'leather_overlay.png',
                 'netherite_layer_2.png': 'netherite.png',
+                'copper_layer_2.png': 'copper.png',  # 添加铜盔甲层2
             }
         }
     }
@@ -7748,6 +7820,8 @@ def reverse_fix_armor_models(temp_dir):
                 'gold.png': 'gold_layer_1.png',
                 'leather.png': 'leather_layer_1.png',
                 'leather_overlay.png': 'leather_layer_1_overlay.png',
+                'netherite.png': 'netherite_layer_1.png',
+                'copper.png': 'copper_layer_1.png',  # 添加铜盔甲层1
             }
         },
         'humanoid_leggings': {
@@ -7759,6 +7833,8 @@ def reverse_fix_armor_models(temp_dir):
                 'gold.png': 'gold_layer_2.png',
                 'leather.png': 'leather_layer_2.png',
                 'leather_overlay.png': 'leather_layer_2_overlay.png',
+                'netherite.png': 'netherite_layer_2.png',
+                'copper.png': 'copper_layer_2.png',  # 添加铜盔甲层2
             }
         }
     }
@@ -8391,8 +8467,50 @@ def overlay_icons(temp_dir):
 
 # 定义 pack_format 顺序
 PACK_FORMAT_ORDER = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 18, 22, 32, 34, 42, 46, 55, 63, 64, 69.0
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 18, 22, 32, 34, 42, 46, 55, 63, 64, 69, 75
 ]
+
+def new_pack_format_generate(temp_dir, pack_meta_path, target_pack_format):
+    """
+    生成1.21.9及以上版本的pack.mcmeta格式
+    :param temp_dir: 临时目录
+    :param pack_meta_path: pack.mcmeta文件路径
+    :param target_pack_format: 目标版本的pack_format
+    """
+    try:
+        # 读取原pack.mcmeta文件
+        try:
+            with open(pack_meta_path, 'r', encoding='utf-8') as f:
+                original_data = json.load(f)
+        except UnicodeDecodeError:
+            log("UTF-8 解码失败，尝试使用 ISO-8859-1")
+            with open(pack_meta_path, 'r', encoding='iso-8859-1') as f:
+                original_data = json.load(f)
+        
+        # 提取原description
+        original_description = ""
+        if 'pack' in original_data and 'description' in original_data['pack']:
+            original_description = original_data['pack']['description']
+        
+        # 创建新的pack.mcmeta格式
+        new_data = {
+            "pack": {
+                "pack_format": 34,
+                "supported_formats": [34, target_pack_format],
+                "min_format": [34, 0],
+                "max_format": [target_pack_format, 0],
+                "description": original_description
+            }
+        }
+        
+        # 覆写原文件
+        with open(pack_meta_path, 'w', encoding='utf-8') as f:
+            json.dump(new_data, f, ensure_ascii=False, indent=4)
+        
+        log(f"已生成1.21.9及以上版本的pack.mcmeta格式，目标版本: {target_pack_format}")
+        
+    except Exception as e:
+        log(f"生成新格式pack.mcmeta时出错: {e}")
 
 # 定义相邻版本转换映射
 ADJACENT_CONVERSIONS = {
@@ -8416,11 +8534,13 @@ ADJACENT_CONVERSIONS = {
     (46, 55): [],
     (55, 63): [],
     (63, 64): [],
-    (64, 69.0): [generate_copper_ingot, generate_copper_block, generate_copper_tools, generate_copper_armor_models],
+    (64, 69): [generate_copper_ingot, generate_copper_block, generate_copper_tools, generate_copper_armor_models],
+    (69, 69.0): [],
 }
 
 ADJACENT_CONVERSIONS_REVERSE = {
-    (69.0, 64): [],
+    (69.0, 69): [],
+    (69, 64): [],
     (63, 64): [],
     (55, 63): [],
     (46, 55): [],
@@ -8453,8 +8573,7 @@ def process_zip(temp_dir, original_file_path, pack_format1, pack_format2, progre
         end_index = PACK_FORMAT_ORDER.index(pack_format2)
     except ValueError:
         log(f"无效的 pack_format: {pack_format1} 或 {pack_format2}")
-        messagebox.showerror("错误", f"无效的 pack_format: {pack_format1} 或 {pack_format2}")
-        return None
+        raise ValueError(f"无效的 pack_format: {pack_format1} 或 {pack_format2}") from None
     
     # 判断转换方向
     if start_index <= end_index:
@@ -8513,36 +8632,51 @@ def process_zip(temp_dir, original_file_path, pack_format1, pack_format2, progre
         # 更新 pack.mcmeta 文件中的 pack_format 字段
         pack_meta_path = os.path.join(temp_dir, 'pack.mcmeta')
         if os.path.exists(pack_meta_path):
-            try:
-                with open(pack_meta_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            except UnicodeDecodeError:
-                log("UTF-8 解码失败，尝试使用 ISO-8859-1")
-                with open(pack_meta_path, 'r', encoding='iso-8859-1') as f:
-                    data = json.load(f)
-
-            # 检查 'pack' 和 'pack_format' 字段是否存在
-            if 'pack' in data and 'pack_format' in data['pack']:
-                original_pack_format = data['pack']['pack_format']
-                data['pack']['pack_format'] = pack_format2  # 更新为目标版本的 pack_format
-
-                # 处理 description 字段
-                if 'description' in data['pack']:
-                    data['pack']['description'] = fix_description(data['pack']['description'])
-
-                # 写回文件，保存更新
-                with open(pack_meta_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=4)
-                log(f"已更新 'pack_format' 从 {original_pack_format} 到 {pack_format2} 在 {pack_meta_path}")
+            # 检查是否为1.21.9及以上版本（pack_format2 >= 69）
+            if pack_format2 >= 69:
+                new_pack_format_generate(temp_dir, pack_meta_path, pack_format2)
             else:
-                log("无效的 pack.mcmeta 结构。未找到 'pack_format'.")
+                try:
+                    with open(pack_meta_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except UnicodeDecodeError:
+                    log("UTF-8 解码失败，尝试使用 ISO-8859-1")
+                    with open(pack_meta_path, 'r', encoding='iso-8859-1') as f:
+                        data = json.load(f)
+
+                # 检查 'pack' 和 'pack_format' 字段是否存在
+                if 'pack' in data and 'pack_format' in data['pack']:
+                    original_pack_format = data['pack']['pack_format']
+                    data['pack']['pack_format'] = pack_format2  # 更新为目标版本的 pack_format
+
+                    # 处理 description 字段
+                    if 'description' in data['pack']:
+                        data['pack']['description'] = fix_description(data['pack']['description'])
+
+                    # 写回文件，保存更新
+                    with open(pack_meta_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                    log(f"已更新 'pack_format' 从 {original_pack_format} 到 {pack_format2} 在 {pack_meta_path}")
+                else:
+                    log("无效的 pack.mcmeta 结构。未找到 'pack_format'.")
         
         # 生成新的文件名：[目标版本]原文件名.zip，避免批量处理时文件名重复
         # 获取原始文件名（不含扩展名）
         original_filename = os.path.basename(original_file_path)
         base_name = os.path.splitext(original_filename)[0]
         
-        # 基本文件名 - 恢复前缀逻辑，格式为[目标版本]原文件名
+        # 检测并移除原始文件名中的版本前缀（如果匹配PACK_FORMAT_MAP中的版本）
+        import re
+        # 获取所有有效的版本字符串
+        valid_versions = list(PACK_FORMAT_MAP.values())
+        # 构建正则表达式，匹配以[版本号]开头的字符串
+        pattern = r'^\[({})\]'.format('|'.join(re.escape(v) for v in valid_versions))
+        # 移除匹配的版本前缀
+        base_name = re.sub(pattern, '', base_name)
+        # 去除可能的空格
+        base_name = base_name.strip()
+        
+        # 基本文件名 - 添加新的目标版本前缀
         base_new_filename = f"[{PACK_FORMAT_MAP[pack_format2]}]{base_name}"
         new_filename = f"{base_new_filename}.zip"
         
@@ -8555,6 +8689,16 @@ def process_zip(temp_dir, original_file_path, pack_format1, pack_format2, progre
             # 例如：C:\材质包\材质包文件夹\材质包1.zip -> C:\材质包\[目标版本]材质包文件夹\
             grandparent_dir = os.path.dirname(parent_folder_path)
             parent_folder_name = os.path.basename(parent_folder_path)
+            
+            # 检测并移除父文件夹名称中的版本前缀（如果匹配PACK_FORMAT_MAP中的版本）
+            import re
+            valid_versions = list(PACK_FORMAT_MAP.values())
+            pattern = r'^\[({})\]'.format('|'.join(re.escape(v) for v in valid_versions))
+            # 移除匹配的版本前缀
+            parent_folder_name = re.sub(pattern, '', parent_folder_name)
+            # 去除可能的空格
+            parent_folder_name = parent_folder_name.strip()
+            
             output_dir = os.path.join(grandparent_dir, f"[{PACK_FORMAT_MAP[pack_format2]}]{parent_folder_name}")
             os.makedirs(output_dir, exist_ok=True)
         else:
@@ -8586,11 +8730,17 @@ def process_zip(temp_dir, original_file_path, pack_format1, pack_format2, progre
         shutil.rmtree(temp_dir)
         log(f"已删除临时目录: {temp_dir}")
         
+        # 更新进度为100%
+        if progress_callback:
+            progress_callback(100)
+        
         return processed_zip_path
     except Exception as e:
         log(f"转换过程中发生错误: {e}")
-        messagebox.showerror("错误", f"转换过程中发生错误: {e}")
-        return None
+        # 如果有进度回调，将进度更新为100%表示处理结束
+        if progress_callback:
+            progress_callback(100)
+        raise RuntimeError(f"转换过程中发生错误: {e}") from e
 
 def main_menu():
     global frame, result_label, icons_path, select_button, selected_files, new_button, root
