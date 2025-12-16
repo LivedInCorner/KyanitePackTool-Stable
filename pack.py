@@ -1,5 +1,5 @@
 """
-由AI生成（未审查）
+注释由AI生成（未审查）
 """
 
 import colorsys
