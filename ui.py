@@ -248,7 +248,7 @@ class ModernMessageBox(QDialog):
     
     def exec_(self):
         """
-    重写exec_方法，返回用户选择的结果
+    exec_方法，返回用户选择的结果
     """
         super().exec_()
         return self.result
@@ -293,8 +293,6 @@ class ModernMessageBox(QDialog):
     """
         msg_box = ModernMessageBox(title, message, parent, ModernMessageBox.SUCCESS)
         return msg_box.exec_()
-
-# 主题色功能已移除
 
 # 物品大小对话框类
 class ItemSizeDialog(QDialog):
