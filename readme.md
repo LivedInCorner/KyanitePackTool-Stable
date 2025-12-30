@@ -68,3 +68,4 @@
 ---
 *本项目由 Hurricane Centre 开发维护。*
 *Minecraft 是 Mojang Studios 的商标。本项目与 Mojang Studios 无关联。*
+*Copyright 2025-2026 Hurricane Centre*
