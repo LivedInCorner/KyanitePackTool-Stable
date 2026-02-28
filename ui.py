@@ -248,7 +248,7 @@ class ModernMessageBox(QDialog):
     
     def exec_(self):
         """
-    exec_方法，返回用户选择的结果
+    重写exec_方法，返回用户选择的结果
     """
         super().exec_()
         return self.result
@@ -293,6 +293,8 @@ class ModernMessageBox(QDialog):
     """
         msg_box = ModernMessageBox(title, message, parent, ModernMessageBox.SUCCESS)
         return msg_box.exec_()
+
+# 主题色功能已移除
 
 # 物品大小对话框类
 class ItemSizeDialog(QDialog):
@@ -2895,13 +2897,22 @@ QProgressBar::chunk {
         self.version_combo_box.setObjectName("versionComboBox")
         # 添加完整的Minecraft版本列表
         versions = [
-            "1.6-1.8", "1.9-1.10", "1.11-1.12", "1.13-1.14", "1.15-1.16.1", "1.16.2-1.16.5",
-            "1.17", "1.18", "1.19-1.19.2", "1.19.3", "1.19.4", "1.20-1.20.1",
-            "1.20.2", "1.20.3-1.20.4", "1.20.5-1.20.6", "1.21-1.21.1",
-            "1.21.2-1.21.3", "1.21.4", "1.21.5", "1.21.6", "1.21.7-1.21.8", 
-            "1.21.9-1.21.10", "1.21.11"
+            "Java 1.6-1.8", "Java 1.9-1.10", "Java 1.11-1.12", "Java 1.13-1.14", "Java 1.15-1.16.1", "Java 1.16.2-1.16.5",
+            "Java 1.17", "Java 1.18", "Java 1.19-1.19.2", "Java 1.19.3", "Java 1.19.4", "Java 1.20-1.20.1",
+            "Java 1.20.2", "Java 1.20.3-1.20.4", "Java 1.20.5-1.20.6", "Java 1.21-1.21.1",
+            "Java 1.21.2-1.21.3", "Java 1.21.4", "Java 1.21.5", "Java 1.21.6", "Java 1.21.7-1.21.8", 
+            "Java 1.21.9-1.21.10", "Java 1.21.11"
         ]
         self.version_combo_box.addItems(versions)
+        
+        # 全物品贴图图层修复复选框
+        self.fix_alpha_layers_checkbox = QCheckBox("启用全物品贴图图层修复 (Beta)")
+        self.fix_alpha_layers_checkbox.setObjectName("fixAlphaLayersCheckbox")
+        
+        # 性能警告提示
+        warning_label = QLabel("⚠️ 注意：此功能可能会导致严重的性能问题，延长转换时间")
+        warning_label.setObjectName("warningLabel")
+        warning_label.setStyleSheet("color: #ff6b6b;")
         
         # 转换进度组件
         progress_label = QLabel("转换进度：")
@@ -2936,6 +2947,8 @@ QProgressBar::chunk {
         # 添加所有组件到框架
         conversion_frame_layout.addWidget(drag_drop_frame)
         conversion_frame_layout.addLayout(version_layout)
+        conversion_frame_layout.addWidget(self.fix_alpha_layers_checkbox, alignment=Qt.AlignLeft)
+        conversion_frame_layout.addWidget(warning_label, alignment=Qt.AlignLeft)
         conversion_frame_layout.addWidget(self.start_conversion_button, alignment=Qt.AlignCenter)
         
         # 添加框架到页面
@@ -2949,7 +2962,7 @@ QProgressBar::chunk {
     def select_resource_pack(self):
         # 打开文件选择对话框，支持多选
         file_paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择材质包", "", "压缩文件 (*.zip);;材质包 (*.mcpack);;所有文件 (*.*)"
+            self, "选择材质包", "", "压缩文件 (*.zip *.rar);;材质包 (*.mcpack);;所有文件 (*.*)"
         )
         
         if file_paths:
@@ -2995,7 +3008,7 @@ QProgressBar::chunk {
         
         # 打开文件选择对话框选择母材质包
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择母材质包", "", "压缩文件 (*.zip);;材质包 (*.mcpack);;所有文件 (*.*)"
+            self, "选择母材质包", "", "压缩文件 (*.zip *.rar);;材质包 (*.mcpack);;所有文件 (*.*)"
         )
         
         if file_path:
@@ -3169,6 +3182,9 @@ QProgressBar::chunk {
         if hasattr(self, 'selected_file_paths'):
             target_version = self.version_combo_box.currentText()
             
+            # 获取全物品贴图图层修复复选框的状态
+            fix_alpha_layers = self.fix_alpha_layers_checkbox.isChecked() if hasattr(self, 'fix_alpha_layers_checkbox') else False
+            
             # 禁用开始转换按钮
             self.start_conversion_button.setEnabled(False)
             
@@ -3185,10 +3201,11 @@ QProgressBar::chunk {
                 progress_updated = pyqtSignal(int)
                 conversion_completed = pyqtSignal(str)
                 
-                def __init__(self, file_paths, target_version):
+                def __init__(self, file_paths, target_version, fix_alpha_layers):
                     super().__init__()
                     self.file_paths = file_paths
                     self.target_version = target_version
+                    self.fix_alpha_layers = fix_alpha_layers
                 
                 def run(self):
                     # 为pack.py设置必要的环境
@@ -3225,7 +3242,22 @@ QProgressBar::chunk {
                         
                         # 初始进度
                         self.progress_updated.emit(0)
-                        # 调用pack.py中的start_conversion函数并传入进度回调
+                        
+                        # 根据目标版本选择不同的转换函数
+                        # 暂时移除基岩版转换支持，保留代码结构以便后期适配
+                        # if self.target_version == "Bedrock Latest":
+                        #     # 调用基岩版转换函数
+                        #     pack.start_bedrock_conversion(self.file_paths, progress_callback)
+                        # else:
+                        # 调用Java版转换函数
+                        # 设置全物品贴图图层修复参数
+                        # 创建一个带有 __init__ 方法的模拟对象
+                        class MockBooleanVar:
+                            def __init__(self, value):
+                                self.value = value
+                            def get(self):
+                                return self.value
+                        pack.fix_alpha_layers_var = MockBooleanVar(self.fix_alpha_layers)
                         pack.start_conversion(self.target_version, progress_callback)
                     except Exception as e:
                         # 捕获所有异常
@@ -3239,7 +3271,7 @@ QProgressBar::chunk {
                         self.conversion_completed.emit(self.target_version)
             
             # 创建并启动线程
-            self.conversion_thread = ConversionThread(self.selected_file_paths, target_version)
+            self.conversion_thread = ConversionThread(self.selected_file_paths, target_version, fix_alpha_layers)
             # 连接信号和槽
             self.conversion_thread.progress_updated.connect(self.update_progress)
             self.conversion_thread.conversion_completed.connect(self.conversion_finished)

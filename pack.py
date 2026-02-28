@@ -26,6 +26,10 @@ import string
 import subprocess
 import logging
 import datetime
+import struct
+import tarfile
+import gzip
+import bz2
 
 
 # 设置日志级别为 DEBUG，记录所有级别的日志
@@ -77,6 +81,231 @@ def log(message):
         print(f"Error writing to log file: {e}")
 
 
+def detect_file_format(file_path):
+    """
+    检测文件格式
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(512)  # 读取完整的TAR头部（512字节）
+            
+        # 检测文件格式
+        if header.startswith(b'PK'):
+            return 'ZIP'
+        elif header.startswith(b'Rar!'):
+            return 'RAR'
+        elif header.startswith(b'7z\xbc\xaf\x27\x1c'):
+            return '7Z'
+        elif header.startswith(b'\x1f\x8b'):
+            return 'GZ'
+        elif header.startswith(b'BZh'):
+            return 'BZ2'
+        else:
+            # 尝试通过其他方式检测TAR格式
+            # TAR文件通常以文件头部开始，每个头部512字节
+            # 检查是否看起来像TAR格式
+            if len(header) >= 512:
+                # TAR头部格式：前100字节是文件名，257-262字节是magic "ustar"
+                try:
+                    # 检查magic字符串位置 (ustar\0)
+                    if header[257:263] == b'ustar\x00':
+                        return 'TAR'
+                    # 另一种检查方式：检查标准的ustar magic
+                    elif header[257:265] == b'ustar\x00  ':
+                        return 'TAR'
+                except:
+                    pass
+            
+            return 'UNKNOWN'
+            
+    except Exception as e:
+        log(f"检测文件格式失败: {str(e)}")
+        return 'UNKNOWN'
+
+
+def convert_to_zip(input_file_path):
+    """
+    将非ZIP格式的文件转换为ZIP格式
+    支持: RAR, 7Z, TAR, GZ, BZ2等格式
+    """
+    import tempfile
+    import shutil
+    import subprocess
+    import os
+    import tarfile
+    import gzip
+    import bz2
+    import zipfile
+    
+    try:
+        log(f"检测到非ZIP格式文件，开始转换: {input_file_path}")
+        
+        # 首先使用文件格式检测来判断文件真实格式
+        detected_format = detect_file_format(input_file_path)
+        log(f"检测到的文件格式: {detected_format}")
+        
+        # 如果检测结果是ZIP格式，检查扩展名
+        if detected_format == 'ZIP':
+            file_ext = os.path.splitext(input_file_path)[1].lower()
+            if file_ext == '.zip':
+                log(f"文件已经是ZIP格式，无需转换")
+                return input_file_path, False
+            else:
+                # 检测为ZIP但扩展名不是.zip，可能是误检，继续处理
+                log(f"文件检测为ZIP但扩展名不符，继续转换过程")
+        
+        # 如果检测为未知格式，也继续转换过程
+        file_ext = os.path.splitext(input_file_path)[1].lower()
+        
+        # 创建临时目录用于转换
+        temp_dir = tempfile.mkdtemp(prefix='mcpack_convert_', suffix='_temp')
+        output_zip_path = os.path.join(temp_dir, 'converted_pack.zip')
+        
+        log(f"创建临时转换目录: {temp_dir}")
+        log(f"输出ZIP路径: {output_zip_path}")
+        
+        # 尝试不同的解压方法
+        extraction_success = False
+        
+        # 方法1: 尝试使用7zip (如果有的话)
+        try:
+            # 常见7z可执行文件路径
+            seven_zip_paths = [
+                '7z', '7za',  # 命令行版本
+                r'C:\Program Files\7-Zip\7z.exe',
+                r'C:\Program Files (x86)\7-Zip\7z.exe',
+                r'C:\Tools\7-Zip\7z.exe',
+                r'C:\7-Zip\7z.exe'
+            ]
+            
+            for seven_zip_path in seven_zip_paths:
+                try:
+                    # 检查7z是否可用
+                    subprocess.run([seven_zip_path, '--help'], 
+                                 capture_output=True, check=True, timeout=5)
+                    
+                    log(f"找到7z工具: {seven_zip_path}")
+                    
+                    # 使用7z解压到临时目录
+                    result = subprocess.run([
+                        seven_zip_path, 'x', input_file_path, 
+                        f'-o{temp_dir}', '-y'
+                    ], capture_output=True, text=True, timeout=60)
+                    
+                    if result.returncode == 0:
+                        log("7z解压成功")
+                        extraction_success = True
+                        break
+                    else:
+                        log(f"7z解压失败: {result.stderr}")
+                        
+                except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+                    
+        except Exception as e:
+            log(f"7z解压尝试失败: {str(e)}")
+        
+        # 方法2: 尝试使用Python内置解压功能 (扩展版)
+        if not extraction_success:
+            try:
+                log("尝试使用Python内置解压功能")
+                
+                # 检测文件格式并使用相应的Python库
+                with open(input_file_path, 'rb') as f:
+                    header = f.read(16)
+                
+                if file_ext in ['.gz', '.tgz']:
+                    log("处理GZ/TGZ格式...")
+                    # 解压gz文件
+                    temp_gz_dir = tempfile.mkdtemp(prefix='mcpack_gz_', suffix='_temp')
+                    try:
+                        with gzip.open(input_file_path, 'rb') as f_in:
+                            with open(os.path.join(temp_gz_dir, 'extracted'), 'wb') as f_out:
+                                shutil.copyfileobj(f_in, f_out)
+                        
+                        # 如果是.tar.gz，提取tar文件
+                        if os.path.splitext(input_file_path)[1] == '.gz' and not os.path.basename(input_file_path).endswith('.tar.gz'):
+                            # 可能是单独的gz文件，移动到temp_dir
+                            extracted_path = os.path.join(temp_gz_dir, 'extracted')
+                            if os.path.exists(extracted_path):
+                                shutil.move(extracted_path, os.path.join(temp_dir, 'extracted.gz'))
+                            shutil.rmtree(temp_gz_dir)
+                        else:
+                            # 是tar.gz文件，提取tar
+                            extracted_path = os.path.join(temp_gz_dir, 'extracted')
+                            if os.path.exists(extracted_path):
+                                with tarfile.open(extracted_path, 'r') as tar_ref:
+                                    tar_ref.extractall(temp_dir)
+                                log("tar.gz解压成功")
+                                extraction_success = True
+                            shutil.rmtree(temp_gz_dir)
+                    except Exception as e:
+                        log(f"GZ解压失败: {str(e)}")
+                        shutil.rmtree(temp_gz_dir, ignore_errors=True)
+                        
+                elif file_ext in ['.bz2', '.tbz2']:
+                    log("处理BZ2/TBZ2格式...")
+                    # 解压bz2文件
+                    temp_bz2_dir = tempfile.mkdtemp(prefix='mcpack_bz2_', suffix='_temp')
+                    try:
+                        with bz2.open(input_file_path, 'rb') as f_in:
+                            with open(os.path.join(temp_bz2_dir, 'extracted'), 'wb') as f_out:
+                                shutil.copyfileobj(f_in, f_out)
+                        
+                        # 如果是.tar.bz2，提取tar文件
+                        if os.path.splitext(input_file_path)[1] == '.bz2' and not os.path.basename(input_file_path).endswith('.tar.bz2'):
+                            extracted_path = os.path.join(temp_bz2_dir, 'extracted')
+                            if os.path.exists(extracted_path):
+                                shutil.move(extracted_path, os.path.join(temp_dir, 'extracted.bz2'))
+                            shutil.rmtree(temp_bz2_dir)
+                        else:
+                            extracted_path = os.path.join(temp_bz2_dir, 'extracted')
+                            if os.path.exists(extracted_path):
+                                with tarfile.open(extracted_path, 'r') as tar_ref:
+                                    tar_ref.extractall(temp_dir)
+                                log("tar.bz2解压成功")
+                                extraction_success = True
+                            shutil.rmtree(temp_bz2_dir)
+                    except Exception as e:
+                        log(f"BZ2解压失败: {str(e)}")
+                        shutil.rmtree(temp_bz2_dir, ignore_errors=True)
+            except Exception as e:
+                log(f"Python内置解压功能失败: {str(e)}")
+        
+        # 如果解压成功，创建ZIP文件
+        if extraction_success:
+            log("开始创建ZIP文件...")
+            
+            # 确定ZIP文件的最终输出路径
+            base_name = os.path.splitext(input_file_path)[0]
+            final_zip_path = f"{base_name}.zip"
+            
+            # 遍历临时目录，将所有文件添加到ZIP中
+            with zipfile.ZipFile(final_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        # 获取文件在ZIP中的相对路径
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, arcname)
+            
+            log(f"ZIP文件创建成功: {final_zip_path}")
+            
+            # 清理临时目录
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            return final_zip_path, True
+        else:
+            log(f"无法解压文件: {input_file_path}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None, False
+            
+    except Exception as e:
+        log(f"转换文件格式时出错: {str(e)}")
+        traceback.print_exc()
+        return None, False
+
+
 def set_default_theme(root):
     default_font = ("微软雅黑", 14)
     root.option_add("*Font", default_font)
@@ -116,10 +345,13 @@ def open_file_location(path):
     else:
         subprocess.call(["xdg-open", path])
 
-def start_processing_conversion(pack_format2, progress_callback=None, file_paths=None):
+def start_processing_conversion(pack_format2, progress_callback=None, file_paths=None, fix_alpha_layers=False):
     """
     开始处理材质包转换
     """
+    import time
+    start_time = time.time()
+    
     # 自动获取源版本的 pack_format
     if file_paths is None:
         file_paths = selected_files.get()
@@ -127,24 +359,26 @@ def start_processing_conversion(pack_format2, progress_callback=None, file_paths
     all_files_to_process = []
     # 存储文件与原始拖放路径的映射关系
     file_to_parent_folder = {}
+    # 存储文件的结构修复状态
+    file_structure_fixed = {}
     
-    # 收集所有要处理的文件（包括文件夹中的ZIP文件）
+    # 收集所有要处理的文件（包括文件夹中的ZIP和RAR文件）
     for path in file_paths:
-        if os.path.isfile(path) and path.lower().endswith('.zip'):
-            # 单个ZIP文件
+        if os.path.isfile(path) and path.lower().endswith(('.zip', '.rar')):
+            # 单个压缩文件
             all_files_to_process.append(path)
             file_to_parent_folder[path] = None  # 单个文件没有父文件夹
         elif os.path.isdir(path):
-            # 文件夹，添加其中所有的ZIP文件
+            # 文件夹，添加其中所有的压缩文件
             for root, dirs, files in os.walk(path):
                 for file in files:
-                    if file.lower().endswith('.zip'):
+                    if file.lower().endswith(('.zip', '.rar')):
                         zip_path = os.path.join(root, file)
                         all_files_to_process.append(zip_path)
                         file_to_parent_folder[zip_path] = path  # 记录文件来自哪个拖放的文件夹
     
     if not all_files_to_process:
-        raise ValueError("没有找到可处理的材质包文件（.zip格式）")
+        raise ValueError("没有找到可处理的材质包文件（.zip或.rar格式）")
     
     log(f"开始批量处理 {len(all_files_to_process)} 个材质包文件")
     
@@ -161,7 +395,7 @@ def start_processing_conversion(pack_format2, progress_callback=None, file_paths
             log(f"开始处理文件 {current_file_index}/{file_count}: {file_path}")
             
             # 解压文件，如有错误会在extract_zip中抛出
-            temp_dir = extract_zip(file_path)
+            temp_dir, structure_fixed = extract_zip(file_path)
             if not temp_dir:
                 log(f"文件解压失败：{os.path.basename(file_path)}")
                 # 更新进度，跳过当前文件
@@ -169,6 +403,9 @@ def start_processing_conversion(pack_format2, progress_callback=None, file_paths
                     base_progress = (current_file_index - 1) * file_weight * 100
                     progress_callback(int(base_progress + file_weight * 100))
                 continue
+            
+            # 记录文件的结构修复状态
+            file_structure_fixed[file_path] = structure_fixed
             
             # 自动读取 pack.mcmeta 获取 pack_format1
             pack_format1 = get_pack_format(temp_dir)
@@ -179,7 +416,13 @@ def start_processing_conversion(pack_format2, progress_callback=None, file_paths
                     base_progress = (current_file_index - 1) * file_weight * 100
                     progress_callback(int(base_progress + file_weight * 100))
                 continue
-            
+
+            # 如果启用了全物品贴图图层修复，执行修复操作
+            if fix_alpha_layers:
+                log(f"开始执行全物品贴图图层修复: {os.path.basename(file_path)}")
+                fix_alpha_layers_in_textures(temp_dir)
+                log(f"全物品贴图图层修复完成: {os.path.basename(file_path)}")
+
             # 为当前文件创建进度回调函数，考虑文件在总进度中的位置
             base_progress = (current_file_index - 1) * file_weight * 100
             
@@ -216,13 +459,17 @@ def start_processing_conversion(pack_format2, progress_callback=None, file_paths
     if not processed_files:
         raise RuntimeError("所有文件处理失败，请检查日志获取详细信息")
     
+    # 计算转换时间
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
     # 设置全局变量以便UI可以访问处理结果
     global global_last_processed_files
     global_last_processed_files = processed_files
     
-    log(f"批量处理完成，成功转换 {len(processed_files)} 个文件")
+    log(f"批量处理完成，成功转换 {len(processed_files)} 个文件，耗时: {elapsed_time:.2f} 秒")
     # 不调用display_multiple_results，返回处理结果给调用者
-    return processed_files
+    return processed_files, file_structure_fixed
 
 def get_pack_format(temp_dir):
     """
@@ -279,57 +526,58 @@ def get_pack_format(temp_dir):
         return "未知版本"
 
 PACK_FORMAT_MAP = {
-    1: "1.6-1.8",
-    2: "1.9-1.10",
-    3: "1.11-1.12",
-    4: "1.13-1.14",
-    5: "1.15-1.16.1",
-    6: "1.16.2-1.16.5",
-    7: "1.17",
-    8: "1.18",
-    9: "1.19-1.19.2",
-    12: "1.19.3",
-    13: "1.19.4",
-    15: "1.20-1.20.1",
-    18: "1.20.2",
-    22: "1.20.3-1.20.4",
-    32: "1.20.5-1.20.6",
-    34: "1.21-1.21.1",
-    42: "1.21.2-1.21.3",
-    46: "1.21.4",
-    55: "1.21.5",
-    63: "1.21.6",
-    64: "1.21.7-1.21.8",
-    69: "1.21.9-1.21.10",
-    75: "1.21.11",
+    1: "Java 1.6-1.8",
+    2: "Java 1.9-1.10",
+    3: "Java 1.11-1.12",
+    4: "Java 1.13-1.14",
+    5: "Java 1.15-1.16.1",
+    6: "Java 1.16.2-1.16.5",
+    7: "Java 1.17",
+    8: "Java 1.18",
+    9: "Java 1.19-1.19.2",
+    12: "Java 1.19.3",
+    13: "Java 1.19.4",
+    15: "Java 1.20-1.20.1",
+    18: "Java 1.20.2",
+    22: "Java 1.20.3-1.20.4",
+    32: "Java 1.20.5-1.20.6",
+    34: "Java 1.21-1.21.1",
+    42: "Java 1.21.2-1.21.3",
+    46: "Java 1.21.4",
+    55: "Java 1.21.5",
+    63: "Java 1.21.6",
+    64: "Java 1.21.7-1.21.8",
+    69: "Java 1.21.9-1.21.10",
+    75: "Java 1.21.11",
+    1000: "Bedrock Latest",
     
 }
 
 PACK_FORMAT_MAP2 = {
-    1: "1.8",
-    2: "1.9-1.10",
-    3: "1.11-1.12",
-    4: "1.13-1.14",
-    5: "1.15-1.16.1",
-    6: "1.16.2-1.16.5",
-    7: "1.17",
-    8: "1.18",
-    9: "1.19-1.19.2",
-    12: "1.19.3",
-    13: "1.19.4",
-    15: "1.20-1.20.1",
-    18: "1.20.2",
-    22: "1.20.3-1.20.4",
-    32: "1.20.5-1.20.6",
-    34: "1.21-1.21.1",
-    42: "1.21.2-1.21.3",
-    46: "1.21.4",
-    55: "1.21.5",
-    63: "1.21.6",
-    64: "1.21.7-1.21.8",
-    69: "1.21.9-1.21.10",
-    75: "1.21.11",
-    
+    1: "Java 1.8",
+    2: "Java 1.9-1.10",
+    3: "Java 1.11-1.12",
+    4: "Java 1.13-1.14",
+    5: "Java 1.15-1.16.1",
+    6: "Java 1.16.2-1.16.5",
+    7: "Java 1.17",
+    8: "Java 1.18",
+    9: "Java 1.19-1.19.2",
+    12: "Java 1.19.3",
+    13: "Java 1.19.4",
+    15: "Java 1.20-1.20.1",
+    18: "Java 1.20.2",
+    22: "Java 1.20.3-1.20.4",
+    32: "Java 1.20.5-1.20.6",
+    34: "Java 1.21-1.21.1",
+    42: "Java 1.21.2-1.21.3",
+    46: "Java 1.21.4",
+    55: "Java 1.21.5",
+    63: "Java 1.21.6",
+    64: "Java 1.21.7-1.21.8",
+    69: "Java 1.21.9-1.21.10",
+    75: "Java 1.21.11",
+    1000: "Bedrock Latest",
 }
 
 # 创建版本字符串到 pack_format 的反向映射
@@ -364,6 +612,30 @@ def show_conversion_options():
     target_menu = tk.OptionMenu(frame, target_var, *target_versions)
     target_menu.pack(pady=5)
 
+    # 全物品贴图图层修复复选框
+    global fix_alpha_layers_var
+    fix_alpha_layers_var = tk.BooleanVar(frame)
+    fix_alpha_layers_var.set(False)  # 默认不启用
+
+    fix_alpha_layers_checkbox = tk.Checkbutton(
+        frame, 
+        text="启用全物品贴图图层修复 (Beta)", 
+        variable=fix_alpha_layers_var, 
+        font=("微软雅黑", 12),
+        bg="#f0f0f0"
+    )
+    fix_alpha_layers_checkbox.pack(pady=(10, 5))
+
+    # 性能警告提示
+    warning_label = tk.Label(
+        frame, 
+        text="⚠️ 注意：此功能可能会导致严重的性能问题，延长转换时间", 
+        font=("微软雅黑", 10), 
+        fg="#ff6b6b",
+        bg="#f0f0f0"
+    )
+    warning_label.pack(pady=(0, 10))
+
     # 开始制作按钮
     start_button = tk.Button(frame, text="开始制作", command=lambda: start_conversion(target_var.get()), 
                              bg="#008CBA", fg="white", font=("微软雅黑", 14), padx=20, pady=10)
@@ -373,6 +645,145 @@ def show_conversion_options():
     back_button = tk.Button(frame, text="返回主页", command=show_main_menu, 
                              bg="#4CAF50", fg="white", font=("微软雅黑", 14), padx=20, pady=10)
     back_button.pack(pady=10)
+
+
+def start_bedrock_conversion(file_paths, progress_callback=None):
+    """
+    执行基岩版转换流程
+    """
+    import time
+    start_time = time.time()
+    
+    try:
+        from bedrock_converter import BedrockConverterInterface as BedrockConverter
+    except ImportError as e:
+        raise ImportError(f"无法导入Python基岩版转换器: {e}")
+    
+    converter = BedrockConverter()
+    processed_files = []
+    all_files_to_process = []
+    
+    # 收集所有要处理的文件（包括文件夹中的ZIP文件）
+    for path in file_paths:
+        if os.path.isfile(path) and path.lower().endswith('.zip'):
+            all_files_to_process.append(path)
+        elif os.path.isdir(path):
+            # 文件夹，添加其中所有的ZIP文件
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.lower().endswith('.zip'):
+                        zip_path = os.path.join(root, file)
+                        all_files_to_process.append(zip_path)
+    
+    if not all_files_to_process:
+        raise ValueError("没有找到可处理的材质包文件（.zip或.rar格式）")
+    
+    log(f"开始基岩版批量转换 {len(all_files_to_process)} 个材质包文件")
+    
+    # 计算每个文件的进度权重
+    file_count = len(all_files_to_process)
+    file_weight = 1.0 / file_count if file_count > 0 else 0
+    
+    current_file_index = 0
+    
+    # 逐个处理每个文件
+    for file_path in all_files_to_process:
+        try:
+            current_file_index += 1
+            log(f"开始处理文件 {current_file_index}/{file_count}: {file_path}")
+            
+            # 为当前文件创建进度回调函数
+            base_progress = (current_file_index - 1) * file_weight * 100
+            
+            def file_progress_callback(file_progress, base_progress=base_progress, file_weight=file_weight):
+                # 计算Java转换到1.21.11的进度（0-50%的文件权重部分）
+                java_progress = base_progress + (file_progress * 0.5 * file_weight)
+                if progress_callback:
+                    progress_callback(int(java_progress))
+            
+            def bedrock_progress_callback(bedrock_progress, base_progress=base_progress, file_weight=file_weight):
+                # 计算基岩版转换的进度（50-100%的文件权重部分）
+                overall_progress = base_progress + 50 * file_weight + (bedrock_progress * 0.5 * file_weight)
+                if progress_callback:
+                    progress_callback(int(overall_progress))
+            
+            # 1. 先将材质包转换到Java 1.21.11（pack_format=75）
+            log(f"开始将材质包转换到Java 1.21.11: {file_path}")
+            java_1_21_11_format = 75
+            # 使用临时列表传递单个文件
+            temp_files = [file_path]
+            # 执行Java 1.21.11转换
+            java_converted_files, java_structure_fixed = start_processing_conversion(java_1_21_11_format, file_progress_callback, temp_files)
+            
+            if not java_converted_files:
+                log(f"Java 1.21.11转换失败: {file_path}")
+                if progress_callback:
+                    progress_callback(int(base_progress + file_weight * 100))
+                continue
+            
+            # 获取转换后的Java 1.21.11文件路径
+            converted_java_file = java_converted_files[0]
+            log(f"Java 1.21.11转换成功: {converted_java_file}")
+            
+            # 2. 再将转换后的Java 1.21.11文件转换为基岩版
+            log(f"开始将Java 1.21.11材质包转换为基岩版: {converted_java_file}")
+            success, result = converter.convert_to_bedrock(converted_java_file, progress_callback=bedrock_progress_callback)
+            
+            # 无论转换成功与否，都删除中间的Java 1.21.11文件
+            try:
+                if os.path.exists(converted_java_file):
+                    os.remove(converted_java_file)
+                    log(f"已删除中间Java 1.21.11文件: {converted_java_file}")
+            except Exception as e:
+                log(f"删除中间文件失败: {e}")
+            
+            if success:
+                # 重命名输出文件，去掉[Java 1.21.11]前缀
+                import re
+                
+                # 获取原始输入文件的名称
+                original_name = os.path.basename(file_path)
+                original_name = os.path.splitext(original_name)[0]  # 去掉扩展名
+                
+                # 构建新的输出文件名
+                output_dir = os.path.dirname(result)
+                new_output_name = f"[Bedrock-Latest]{original_name}.mcpack"
+                new_output_path = os.path.join(output_dir, new_output_name)
+                
+                # 重命名文件
+                os.rename(result, new_output_path)
+                
+                processed_files.append(new_output_path)
+                log(f"基岩版转换成功: {new_output_path}")
+            else:
+                log(f"基岩版转换失败: {result}")
+                # 更新进度，跳过当前文件
+                if progress_callback:
+                    progress_callback(int(base_progress + file_weight * 100))
+                continue
+            
+        except Exception as e:
+            # 记录单个文件处理失败的异常，继续处理下一个文件
+            log(f"处理文件 {os.path.basename(file_path)} 时出错: {str(e)}")
+            # 出错时也更新进度，避免进度条卡住
+            if progress_callback:
+                base_progress = (current_file_index - 1) * file_weight * 100
+                progress_callback(int(base_progress + file_weight * 100))
+            continue
+    
+    if not processed_files:
+        raise RuntimeError("所有文件基岩版转换失败，请检查日志获取详细信息")
+    
+    # 计算转换时间
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    # 设置全局变量以便UI可以访问处理结果
+    global global_last_processed_files
+    global_last_processed_files = processed_files
+    
+    log(f"基岩版批量转换完成，成功转换 {len(processed_files)} 个文件，耗时: {elapsed_time:.2f} 秒")
+    return processed_files
 
 def start_conversion(target_version, progress_callback=None):
     """
@@ -391,8 +802,19 @@ def start_conversion(target_version, progress_callback=None):
         # 更友好的错误消息
         raise ValueError("操作失败：请先选择至少一个材质包文件再进行转换")
     
+    # 获取是否启用全物品贴图图层修复
+    global fix_alpha_layers_var
+    fix_alpha_layers = fix_alpha_layers_var.get() if fix_alpha_layers_var else False
+    
     # 执行转换，不捕获异常，让异常向上传播
-    start_processing_conversion(pack_format2, progress_callback)
+    processed_files, file_structure_fixed = start_processing_conversion(pack_format2, progress_callback, file_paths, fix_alpha_layers)
+    
+    # 设置全局变量以便UI可以访问处理结果
+    global global_last_processed_files
+    global_last_processed_files = processed_files
+    
+    log(f"Java版批量转换完成，成功转换 {len(processed_files)} 个文件")
+    return processed_files
 
 def select_export_path(label):
     """
@@ -567,7 +989,8 @@ def start_processing_overlay(target_version, export_path, sliders):
                         break
                 
                 if original_json_path is None:
-                    print(f"Warning: {json_file_name} not found in any size folder")
+                    logging.warning(f"{json_file_name} not found in any size folder, skipping...")
+                    continue
 
                 # 检查原始 JSON 文件是否存在
                 logging.info(f"检查 {original_json_path} 是否存在...")
@@ -1938,8 +2361,8 @@ def process_grindstone_image(container_path):
                     # 打开 anvil.png 并等比缩放到与 grindstone.png 相同的尺寸
                     anvil_img = Image.open(anvil_path).convert("RGBA")
                     if anvil_img.size != img_copy.size:
-                        anvil_img = anvil_img.resize(img_copy.size, Image.ANTIALIAS)
-                        log(f"Resized 'anvil.png' from {anvil_img.size} to {img_copy.size}")
+                        anvil_img = anvil_img.resize(img_copy.size, Image.Resampling.NEAREST)
+                        log(f"Resized 'anvil.png' from {anvil_img.size} to {img_copy.size} using nearest neighbor")
 
                     # 定义源区域 (176,0)-(204,21) scaled
                     source_box = (
@@ -2156,13 +2579,13 @@ def rgba_to_hsv(rgba):
             h = 2 + (b - r) / delta
         else:
             h = 4 + (r - g) / delta
-    h = (h * 60) % 360
-    return (h / 360.0, s, v, a / 255.0)
+    h = (h / 6.0) % 1.0  # 转换为 0-1 范围
+    return (h, s, v, a / 255.0)
 
 # Helper function to convert HSV to RGBA
 def hsv_to_rgba(hsv):
     h, s, v, a = hsv
-    h = h * 6
+    h = h * 6  # h 已经是 0-1 范围，现在转换为 0-6
     i = int(h)
     f = h - i
     p = v * (1 - s)
@@ -2178,7 +2601,7 @@ def hsv_to_rgba(hsv):
         r, g, b = p, q, v
     elif i == 4:
         r, g, b = t, p, v
-    else:
+    else:  # i == 5
         r, g, b = v, p, q
     return (int(r * 255), int(g * 255), int(b * 255), int(a * 255))
 
@@ -2298,6 +2721,45 @@ def change_white_to_yellow(image):
     image.putdata(new_data)
     return image
 
+def fix_golden_shovel(image_path):
+    """
+    专门修复金铲子的"纸片"问题
+    确保金铲子的像素正确显示，不会变成完全透明
+    """
+    log(f"Fixing golden_shovel image: {image_path}")
+    try:
+        img = Image.open(image_path).convert("RGBA")
+        pixels = img.load()
+        width, height = img.size
+        
+        fixed_pixels = 0
+        for y in range(height):
+            for x in range(width):
+                r, g, b, a = pixels[x, y]
+                
+                # 修复可能的问题：确保半透明像素不会变成完全透明
+                # 如果像素有颜色但透明度异常低，恢复合理的透明度
+                if a < 50 and (r > 50 or g > 50 or b > 50):
+                    # 像素有颜色但透明度太低，恢复透明度
+                    pixels[x, y] = (r, g, b, 255)
+                    fixed_pixels += 1
+                
+                # 修复可能的问题：确保不透明像素保持不透明
+                if a > 200 and a < 255:
+                    # 接近不透明但不是完全不透明，设为完全不透明
+                    pixels[x, y] = (r, g, b, 255)
+                    fixed_pixels += 1
+        
+        if fixed_pixels > 0:
+            log(f"Fixed {fixed_pixels} pixels in golden_shovel.png")
+            img.save(image_path)
+        else:
+            log(f"No fixes needed for golden_shovel.png")
+            
+    except Exception as e:
+        log(f"Error fixing golden_shovel image: {e}")
+        traceback.print_exc()
+
 # Function to rename items
 def rename_items(items_path_new, rename_pairs):
     log(f"Renaming items in: {items_path_new}")
@@ -2310,6 +2772,11 @@ def rename_items(items_path_new, rename_pairs):
             if os.path.exists(old_png_path):
                 os.rename(old_png_path, new_png_path)
                 log(f"Renamed '{old_name}' to '{new_name}'")
+                
+                # 特殊处理：修复金铲子的"纸片"问题
+                if old_name == 'gold_shovel.png' and new_name == 'golden_shovel.png':
+                    log(f"Applying special fix for golden_shovel.png")
+                    fix_golden_shovel(new_png_path)
                 
                 # 检查并重命名对应的 .png.mcmeta 文件
                 old_meta_path = old_png_path + '.mcmeta'
@@ -4973,15 +5440,15 @@ def copy_and_paste_region(image, src_x1, src_y1, src_x2, src_y2, dst_x, dst_y):
 
 def on_file_drop(event):
     files = root.splitlist(event.data)
-    zip_files = [f for f in files if f.lower().endswith('.zip')]
+    zip_files = [f for f in files if f.lower().endswith(('.zip', '.rar'))]
     if zip_files:
         selected_files.set(zip_files)
         select_button.config(text=f"{len(zip_files)} 个文件已选择")
     else:
-        messagebox.showerror("错误", "请拖拽ZIP文件")
+        messagebox.showerror("错误", "请拖拽ZIP或RAR文件")
 
 def select_files():
-    file_paths = filedialog.askopenfilenames(filetypes=[('ZIP files', '*.zip')])
+    file_paths = filedialog.askopenfilenames(filetypes=[('压缩文件', '*.zip *.rar'), ('ZIP files', '*.zip'), ('RAR files', '*.rar')])
     if file_paths:
         selected_files.set(file_paths)
         select_button.config(text=f"{len(file_paths)} 个文件已选择")
@@ -5014,7 +5481,6 @@ def display_result(processed_zip_path, version="1.18", message_type="default"):
             new_button_exists = True
 
         pyperclip.copy(processed_zip_path)
-        messagebox.showinfo("Success", f"The processed ZIP has been saved to: {processed_zip_path}\nThe path has been copied to the clipboard.")
     except Exception as e:
         print(f"Error displaying result: {e}")
         messagebox.showerror("Error", f"Error displaying result: {e}")
@@ -5042,6 +5508,27 @@ def display_multiple_results(processed_zip_paths, version="1.18", message_type="
         # 简化显示处理信息，只显示转换数量
         print(f"已成功转换 {len(processed_zip_paths)} 个材质包文件")
         print("文件夹路径已复制到剪贴板，您可以直接粘贴使用")
+        
+        # 如果是带有结构修复的转换，显示特殊的提示信息
+        if message_type == "conversion_with_fix":
+            messagebox.showinfo(
+                "转换完成", 
+                f"已成功转换 {len(processed_zip_paths)} 个材质包文件到 {version} 版本\n\n" 
+                "注意：部分材质包的结构存在问题，已自动修复\n" 
+                "修复内容包括：\n" 
+                "- 将 pack.mcmeta 文件移动到根目录\n" 
+                "- 将 assets 文件夹移动到根目录\n" 
+                "- 将 pack.png 文件移动到根目录\n\n" 
+                f"转换后的文件保存在：\n{output_dirs_list[0] if output_dirs_list else '未知位置'}\n\n" 
+                "路径已复制到剪贴板"
+            )
+        elif message_type == "conversion":
+            messagebox.showinfo(
+                "转换完成", 
+                f"已成功转换 {len(processed_zip_paths)} 个材质包文件到 {version} 版本\n\n" 
+                f"转换后的文件保存在：\n{output_dirs_list[0] if output_dirs_list else '未知位置'}\n\n" 
+                "路径已复制到剪贴板"
+            )
     except Exception as e:
         print(f"显示结果时出错: {e}")
 
@@ -5130,78 +5617,220 @@ def extract_zip(zip_path):
         temp_dir = tempfile.mkdtemp(prefix='mcpack_', suffix='_temp')
         os.makedirs(temp_dir, exist_ok=True)
 
-        # 使用二进制模式打开ZIP文件，避免文件名编码问题
+        # 检查文件是否存在
+        if not os.path.exists(zip_path):
+            raise FileNotFoundError(f"文件不存在: {zip_path}")
+        
+        # 检查文件大小
+        file_size = os.path.getsize(zip_path)
+        if file_size == 0:
+            raise ValueError(f"文件为空: {zip_path}")
+        
+        # 检查文件的真实类型（通过文件头）
         with open(zip_path, 'rb') as f:
-            # 创建一个临时的内存中的ZIP文件对象
-            zip_bytes = io.BytesIO(f.read())
-            
-        # 使用更可靠的方法解压ZIP文件
-        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
-            # 获取所有文件信息
-            for item in zip_ref.infolist():
-                try:
-                    # 尝试多种编码方式解码文件名
-                    filename = None
-                    encodings = ['utf-8', 'gbk', 'latin-1']
-                    
-                    for encoding in encodings:
-                        try:
+            header = f.read(8)
+        
+        # 根据文件类型选择解压方式
+        if header[:4] == b'PK\x03\x04' or header[:4] == b'PK\x05\x06' or header[:4] == b'PK\x07\x08':
+            # ZIP文件
+            log(f"检测到ZIP文件，开始解压: {zip_path}")
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                for item in zip_ref.infolist():
+                    try:
+                        filename = None
+                        encodings = ['utf-8', 'gbk', 'latin-1']
+                        
+                        for encoding in encodings:
+                            try:
+                                if isinstance(item.filename, bytes):
+                                    filename = item.filename.decode(encoding)
+                                else:
+                                    filename = item.filename
+                                test_path = os.path.join(temp_dir, filename)
+                                break
+                            except (UnicodeDecodeError, UnicodeEncodeError):
+                                continue
+                        
+                        if filename is None:
                             if isinstance(item.filename, bytes):
-                                filename = item.filename.decode(encoding)
+                                filename = item.filename.decode('latin-1')
                             else:
                                 filename = item.filename
-                            # 测试文件名是否有效
-                            test_path = os.path.join(temp_dir, filename)
-                            break
-                        except (UnicodeDecodeError, UnicodeEncodeError):
-                            continue
-                    
-                    # 如果所有编码都失败，使用latin-1作为最后手段（不会失败）
-                    if filename is None:
-                        if isinstance(item.filename, bytes):
-                            filename = item.filename.decode('latin-1')
-                        else:
-                            filename = item.filename
-                    
-                    # 构建目标路径
-                    target_path = os.path.join(temp_dir, filename)
-                    
-                    # 确保目标目录存在
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                    
-                    # 读取文件内容并写入目标路径
-                    with zip_ref.open(item) as source, open(target_path, 'wb') as target:
-                        shutil.copyfileobj(source, target)
                         
-                    log(f"成功解压: {filename}")
-                    
-                except Exception as e:
-                    log(f"解压文件时出错: {str(e)}")
-                    # 继续处理其他文件，不中断整个解压过程
-                    continue
-
-        # 尝试读取并修复 pack.mcmeta 文件的编码
-        pack_meta_path = os.path.join(temp_dir, 'pack.mcmeta')
+                        target_path = os.path.join(temp_dir, filename.replace('/', os.sep))
+                        
+                        try:
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        except Exception as e:
+                            log(f"创建目录时出错: {str(e)}")
+                            target_dir = os.path.dirname(target_path)
+                            if not os.path.exists(target_dir):
+                                try:
+                                    os.makedirs(target_dir)
+                                except Exception as e2:
+                                    log(f"再次创建目录时出错: {str(e2)}")
+                                    continue
+                        
+                        try:
+                            with zip_ref.open(item) as source:
+                                if target_path.endswith(os.sep):
+                                    if not os.path.exists(target_path):
+                                        os.makedirs(target_path, exist_ok=True)
+                                    continue
+                                
+                                with open(target_path, 'wb') as target:
+                                    shutil.copyfileobj(source, target)
+                        except PermissionError as e:
+                            log(f"写入文件时权限被拒绝: {str(e)}")
+                            try:
+                                simple_filename = os.path.basename(target_path)
+                                simple_target_path = os.path.join(temp_dir, simple_filename)
+                                with zip_ref.open(item) as source, open(simple_target_path, 'wb') as target:
+                                    shutil.copyfileobj(source, target)
+                                log(f"使用简化路径成功写入文件: {simple_filename}")
+                            except Exception as e2:
+                                log(f"再次写入文件时出错: {str(e2)}")
+                                continue
+                        except Exception as e:
+                            log(f"处理文件时出错: {str(e)}")
+                            continue
+                        
+                        log(f"成功解压: {filename}")
+                        
+                    except Exception as e:
+                        log(f"解压文件时出错: {str(e)}")
+                        continue
+                        
+        elif header[:4] == b'Rar!':
+            # RAR文件 - 使用unrar命令行工具
+            log(f"检测到RAR文件，使用unrar命令行解压: {zip_path}")
+            try:
+                import subprocess
+                
+                # 使用unrar命令行工具
+                cmd = [
+                    'unrar',
+                    'x',           # 解压并保留路径
+                    '-y',          # 自动覆盖
+                    '-p-',         # 无密码
+                    '-o+',         # 覆盖现有文件
+                    zip_path,
+                    temp_dir + os.sep
+                ]
+                
+                log(f"执行命令: {' '.join(cmd)}")
+                
+                # 执行unrar命令，设置超时
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,  # 5分钟超时
+                    encoding='utf-8',
+                    errors='replace'
+                )
+                
+                if result.returncode == 0:
+                    log(f"成功解压RAR文件到: {temp_dir}")
+                    # 统计解压的文件数量
+                    file_count = 0
+                    for root, dirs, files in os.walk(temp_dir):
+                        file_count += len(files)
+                    log(f"共解压 {file_count} 个文件")
+                else:
+                    # 检查是否是密码问题
+                    if "password" in result.stderr.lower() or "密码" in result.stderr:
+                        raise ValueError(f"RAR文件已加密，需要密码才能解压: {zip_path}")
+                    else:
+                        log(f"unrar输出: {result.stdout}")
+                        log(f"unrar错误: {result.stderr}")
+                        raise ValueError(f"解压RAR文件失败 (返回码: {result.returncode}): {zip_path}")
+                        
+            except subprocess.TimeoutExpired:
+                raise ValueError(f"解压RAR文件超时: {zip_path}")
+            except FileNotFoundError:
+                raise ValueError(f"未找到unrar工具，请下载并安装UnRAR: https://www.rarlab.com/rar_add.htm")
+            except Exception as e:
+                raise ValueError(f"解压RAR文件时出错: {e}")
+                
+        else:
+            raise ValueError(f"文件不是有效的ZIP或RAR格式: {zip_path}")
         
-        # 如果根目录没有找到，递归搜索整个temp_extract目录
-        if not os.path.exists(pack_meta_path):
-            log(f"根目录未找到 pack.mcmeta 文件，开始递归搜索整个目录: {temp_dir}")
+        # 处理pack.mcmeta文件
+        pack_meta_path = os.path.join(temp_dir, 'pack.mcmeta')
+        assets_folder_path = os.path.join(temp_dir, 'assets')
+        pack_png_path = os.path.join(temp_dir, 'pack.png')
+        
+        # 标记是否需要修复结构
+        structure_fixed = False
+        
+        if not os.path.exists(pack_meta_path) or not os.path.exists(assets_folder_path) or not os.path.exists(pack_png_path):
+            log(f"根目录未找到必要文件，开始递归搜索整个目录: {temp_dir}")
+            
+            # 搜索必要文件
+            found_pack_meta = None
+            found_assets = None
+            found_pack_png = None
+            
             for root, dirs, files in os.walk(temp_dir):
-                if 'pack.mcmeta' in files:
-                    pack_meta_path = os.path.join(root, 'pack.mcmeta')
-                    log(f"在子目录中找到 pack.mcmeta 文件: {pack_meta_path}")
+                if not found_pack_meta and 'pack.mcmeta' in files:
+                    found_pack_meta = os.path.join(root, 'pack.mcmeta')
+                    log(f"在子目录中找到 pack.mcmeta 文件: {found_pack_meta}")
+                
+                if not found_assets and 'assets' in dirs:
+                    found_assets = os.path.join(root, 'assets')
+                    log(f"在子目录中找到 assets 文件夹: {found_assets}")
+                
+                if not found_pack_png and 'pack.png' in files:
+                    found_pack_png = os.path.join(root, 'pack.png')
+                    log(f"在子目录中找到 pack.png 文件: {found_pack_png}")
+                
+                # 如果所有文件都找到了，停止搜索
+                if found_pack_meta and found_assets and found_pack_png:
                     break
+            
+            # 修复结构
+            if found_pack_meta:
+                if not os.path.exists(pack_meta_path):
+                    shutil.copy(found_pack_meta, pack_meta_path)
+                    log(f"已将 pack.mcmeta 复制到根目录")
+                    structure_fixed = True
+                pack_meta_path = pack_meta_path
+            
+            if found_assets:
+                if not os.path.exists(assets_folder_path):
+                    shutil.copytree(found_assets, assets_folder_path)
+                    log(f"已将 assets 文件夹复制到根目录")
+                    structure_fixed = True
+            
+            if found_pack_png:
+                if not os.path.exists(pack_png_path):
+                    shutil.copy(found_pack_png, pack_png_path)
+                    log(f"已将 pack.png 复制到根目录")
+                    structure_fixed = True
+        
+        # 检查是否找到pack.mcmeta文件
+        if not os.path.exists(pack_meta_path):
+            log("错误: 未找到 pack.mcmeta 文件")
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            raise ValueError(f"材质包缺少必要的 pack.mcmeta 文件: {zip_path}")
+        
+        # 检查是否找到assets文件夹
+        if not os.path.exists(assets_folder_path):
+            log("错误: 未找到 assets 文件夹")
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            raise ValueError(f"材质包缺少必要的 assets 文件夹: {zip_path}")
         
         if os.path.exists(pack_meta_path):
             data = None
             try:
-                # 首先尝试使用utf-8-sig编码（支持UTF-8 BOM）
                 with open(pack_meta_path, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 log("编码或JSON解析失败，尝试其他编码格式")
                 
-                # 尝试其他常见编码
                 encodings_to_try = ['gbk', 'utf-16', 'latin-1']
                 content = None
                 
@@ -5214,47 +5843,41 @@ def extract_zip(zip_path):
                     except UnicodeDecodeError:
                         continue
                 
-                # 如果所有编码都失败，使用二进制模式读取并尝试修复
                 if content is None:
                     log("所有编码尝试失败，使用二进制模式读取并修复")
                     with open(pack_meta_path, 'rb') as f:
                         binary_content = f.read()
-                    
-                    # 尝试解码并忽略错误
                     content = binary_content.decode('utf-8', errors='replace')
                 
-                # 清理控制字符
                 cleaned_content = clean_control_characters(content)
-                
-                # 只提取有效的 JSON 部分
                 json_content = clean_non_json_content(cleaned_content)
+                
                 if json_content:
                     try:
                         data = json.loads(json_content)
                     except json.JSONDecodeError as e:
                         log(f"无法修复 JSON 解码错误: {e}")
                         return None
-
-            # 保存清理后的 JSON，只有在data有效时才保存
+            
             if data is not None:
                 with open(pack_meta_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
             else:
                 log("警告: 无法解析pack.mcmeta文件，跳过保存操作")
-
-        return temp_dir
+        
+        return temp_dir, structure_fixed
     except PermissionError as e:
         log(f"Error extracting zip '{zip_path}': Permission denied. {e}")
         traceback.print_exc()
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-        return None
+        return None, False
     except Exception as e:
         log(f"Error extracting zip '{zip_path}': {e}")
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         traceback.print_exc()
-        return None
+        return None, False
 
 def delete_folder(path):
     """
@@ -5328,6 +5951,233 @@ def generate_tipped_arrow_images(temp_dir):
     except Exception as e:
         log(f"处理 'tipped_arrow_base.png' 时出错: {e}")
         traceback.print_exc()
+
+
+def fix_alpha_layers_in_textures(temp_dir):
+    """
+    修复材质包中所有物品贴图的 alpha 图层问题
+    尝试多种修复方式以处理不同类型的 alpha 图层问题
+    """
+    try:
+        import os
+        from PIL import Image
+        
+        # 定义需要搜索的目录
+        search_dirs = [
+            os.path.join(temp_dir, "assets", "minecraft", "textures", "items"),
+            os.path.join(temp_dir, "assets", "minecraft", "textures", "blocks"),
+            os.path.join(temp_dir, "assets", "minecraft", "textures", "entity"),
+            os.path.join(temp_dir, "assets", "minecraft", "textures", "gui"),
+            os.path.join(temp_dir, "assets", "minecraft", "textures", "misc")
+        ]
+        
+        # 记录修复的文件数量
+        fixed_count = 0
+        total_count = 0
+        
+        # 递归搜索所有 PNG 文件
+        for search_dir in search_dirs:
+            if not os.path.exists(search_dir):
+                continue
+            
+            for root, dirs, files in os.walk(search_dir):
+                for file in files:
+                    if file.lower().endswith('.png'):
+                        total_count += 1
+                        png_path = os.path.join(root, file)
+                        
+                        try:
+                            # 打开图像文件
+                            img = Image.open(png_path).convert('RGBA')
+                            
+                            # 获取图像的宽度和高度
+                            width, height = img.size
+                            
+                            # 检查并修复 alpha 图层
+                            has_alpha_issues = False
+                            pixels = img.load()
+                            
+                            for x in range(width):
+                                for y in range(height):
+                                    r, g, b, a = pixels[x, y]
+                                    # 修复方式 1: 处理 alpha 为 0 但 RGB 不为 0 的像素
+                                    if a == 0 and (r != 0 or g != 0 or b != 0):
+                                        # 修复：将 RGB 值设置为 0
+                                        pixels[x, y] = (0, 0, 0, 0)
+                                        has_alpha_issues = True
+                                    # 修复方式 2: 处理 alpha 不为 0 但 RGB 为 0 的像素（可能是透明度过高）
+                                    elif a != 0 and a < 255 and r == 0 and g == 0 and b == 0:
+                                        # 修复：根据 alpha 值调整 RGB 值，使其更接近可见
+                                        # 这里使用 alpha 值作为 RGB 值的基础，确保有一定的可见性
+                                        gray_value = int(a * 0.8)  # 使用 alpha 值的 80% 作为灰度值
+                                        pixels[x, y] = (gray_value, gray_value, gray_value, a)
+                                        has_alpha_issues = True
+                                    # 修复方式 3: 处理 alpha 值异常的像素（如负值或超过 255 的值）
+                                    elif a < 0 or a > 255:
+                                        # 修复：将 alpha 值限制在 0-255 范围内
+                                        clamped_alpha = max(0, min(255, a))
+                                        pixels[x, y] = (r, g, b, clamped_alpha)
+                                        has_alpha_issues = True
+                                    # 修复方式 4: 处理 RGB 值异常的像素（如负值或超过 255 的值）
+                                    elif r < 0 or r > 255 or g < 0 or g > 255 or b < 0 or b > 255:
+                                        # 修复：将 RGB 值限制在 0-255 范围内
+                                        clamped_r = max(0, min(255, r))
+                                        clamped_g = max(0, min(255, g))
+                                        clamped_b = max(0, min(255, b))
+                                        pixels[x, y] = (clamped_r, clamped_g, clamped_b, a)
+                                        has_alpha_issues = True
+                                    # 修复方式 5: 处理半透明像素的边缘问题（抗锯齿修复）
+                                    elif a > 0 and a < 255:
+                                        # 计算像素的实际亮度
+                                        brightness = (r + g + b) / 3
+                                        # 如果亮度与 alpha 值差异过大，可能存在边缘问题
+                                        # 这里使用简单的方法：确保半透明像素的亮度与 alpha 值成比例
+                                        expected_brightness = int(a * 0.8)
+                                        if abs(brightness - expected_brightness) > 50:
+                                            # 调整 RGB 值，使其亮度更接近预期值
+                                            if brightness > expected_brightness:
+                                                # 过亮，降低亮度
+                                                scale_factor = expected_brightness / max(brightness, 1)
+                                                new_r = int(r * scale_factor)
+                                                new_g = int(g * scale_factor)
+                                                new_b = int(b * scale_factor)
+                                            else:
+                                                # 过暗，增加亮度
+                                                scale_factor = expected_brightness / max(brightness, 1)
+                                                new_r = min(255, int(r * scale_factor))
+                                                new_g = min(255, int(g * scale_factor))
+                                                new_b = min(255, int(b * scale_factor))
+                                            pixels[x, y] = (new_r, new_g, new_b, a)
+                                            has_alpha_issues = True
+                                    # 修复方式 6: 处理颜色通道不平衡的像素
+                                    elif a == 255 and (r, g, b) != (0, 0, 0):
+                                        # 计算 RGB 值的标准差，如果过大，说明颜色通道不平衡
+                                        avg_color = (r + g + b) / 3
+                                        std_dev = ((r - avg_color)**2 + (g - avg_color)**2 + (b - avg_color)**2) ** 0.5
+                                        if std_dev > 80:  # 阈值可以根据需要调整
+                                            # 修复：调整颜色通道，使其更加平衡
+                                            # 这里使用简单的方法：向平均颜色值靠拢
+                                            balance_factor = 0.3  # 平衡因子，0-1 之间
+                                            new_r = int(r * (1 - balance_factor) + avg_color * balance_factor)
+                                            new_g = int(g * (1 - balance_factor) + avg_color * balance_factor)
+                                            new_b = int(b * (1 - balance_factor) + avg_color * balance_factor)
+                                            pixels[x, y] = (new_r, new_g, new_b, a)
+                                            has_alpha_issues = True
+                                    # 修复方式 7: 处理边缘像素的 alpha 值，确保边缘过渡更加平滑
+                                    elif a > 0 and a < 255:
+                                        # 检查周围像素的 alpha 值，如果差异过大，可能存在边缘问题
+                                        # 这里使用简单的方法：检查上下左右四个像素
+                                        neighbor_alpha_values = []
+                                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                            nx, ny = x + dx, y + dy
+                                            if 0 <= nx < width and 0 <= ny < height:
+                                                nr, ng, nb, na = pixels[nx, ny]
+                                                neighbor_alpha_values.append(na)
+                                        if neighbor_alpha_values:
+                                            avg_neighbor_alpha = sum(neighbor_alpha_values) / len(neighbor_alpha_values)
+                                            if abs(a - avg_neighbor_alpha) > 80:  # 阈值可以根据需要调整
+                                                # 修复：向周围像素的平均 alpha 值靠拢
+                                                smooth_factor = 0.5  # 平滑因子，0-1 之间
+                                                new_alpha = int(a * (1 - smooth_factor) + avg_neighbor_alpha * smooth_factor)
+                                                # 同时调整 RGB 值，确保颜色与新的 alpha 值匹配
+                                                brightness = (r + g + b) / 3
+                                                expected_brightness = int(new_alpha * 0.8)
+                                                if brightness != 0:
+                                                    scale_factor = expected_brightness / brightness
+                                                    new_r = min(255, int(r * scale_factor))
+                                                    new_g = min(255, int(g * scale_factor))
+                                                    new_b = min(255, int(b * scale_factor))
+                                                else:
+                                                    new_r = new_g = new_b = expected_brightness
+                                                pixels[x, y] = (new_r, new_g, new_b, new_alpha)
+                                                has_alpha_issues = True
+                                    # 修复方式 8: 处理完全不透明但颜色接近黑色的像素
+                                    elif a == 255 and r < 30 and g < 30 and b < 30:
+                                        # 检查周围像素的颜色，如果周围像素较亮，可能是由于 alpha 通道问题导致的
+                                        neighbor_brightness = []
+                                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                            nx, ny = x + dx, y + dy
+                                            if 0 <= nx < width and 0 <= ny < height:
+                                                nr, ng, nb, na = pixels[nx, ny]
+                                                if na == 255:
+                                                    neighbor_brightness.append((nr + ng + nb) / 3)
+                                        if neighbor_brightness:
+                                            avg_neighbor_brightness = sum(neighbor_brightness) / len(neighbor_brightness)
+                                            if avg_neighbor_brightness > 100:  # 阈值可以根据需要调整
+                                                # 修复：将像素颜色调整为周围像素的平均颜色
+                                                new_r = int(avg_neighbor_brightness)
+                                                new_g = int(avg_neighbor_brightness)
+                                                new_b = int(avg_neighbor_brightness)
+                                                pixels[x, y] = (new_r, new_g, new_b, a)
+                                                has_alpha_issues = True
+                                    # 修复方式 9: 处理半透明像素的颜色饱和度
+                                    elif a > 0 and a < 255:
+                                        # 计算颜色的饱和度
+                                        max_rgb = max(r, g, b)
+                                        min_rgb = min(r, g, b)
+                                        if max_rgb > 0:
+                                            saturation = (max_rgb - min_rgb) / max_rgb
+                                            # 如果饱和度与 alpha 值不匹配，可能存在问题
+                                            expected_saturation = a / 255
+                                            if abs(saturation - expected_saturation) > 0.3:  # 阈值可以根据需要调整
+                                                # 修复：调整颜色饱和度，使其与 alpha 值匹配
+                                                # 这里使用简单的方法：向灰度值靠拢或远离
+                                                if saturation > expected_saturation:
+                                                    # 降低饱和度
+                                                    gray_value = (r + g + b) / 3
+                                                    desaturate_factor = expected_saturation / max(saturation, 0.1)
+                                                    new_r = int(r * desaturate_factor + gray_value * (1 - desaturate_factor))
+                                                    new_g = int(g * desaturate_factor + gray_value * (1 - desaturate_factor))
+                                                    new_b = int(b * desaturate_factor + gray_value * (1 - desaturate_factor))
+                                                else:
+                                                    # 增加饱和度
+                                                    gray_value = (r + g + b) / 3
+                                                    saturate_factor = expected_saturation / max(saturation, 0.1)
+                                                    new_r = min(255, int((r - gray_value) * saturate_factor + gray_value))
+                                                    new_g = min(255, int((g - gray_value) * saturate_factor + gray_value))
+                                                    new_b = min(255, int((b - gray_value) * saturate_factor + gray_value))
+                                                pixels[x, y] = (new_r, new_g, new_b, a)
+                                                has_alpha_issues = True
+                                    # 修复方式 10: 处理图像整体的 alpha 通道问题
+                                    # 这里可以添加更复杂的算法，如 alpha 通道的一致性检查
+                                    # 暂时使用简单的方法：确保 alpha 值为 255 的像素不会有半透明的邻居
+                                    elif a == 255:
+                                        # 检查周围像素的 alpha 值
+                                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                            nx, ny = x + dx, y + dy
+                                            if 0 <= nx < width and 0 <= ny < height:
+                                                nr, ng, nb, na = pixels[nx, ny]
+                                                if na > 0 and na < 255:
+                                                    # 计算边缘像素的颜色，确保与不透明像素的颜色匹配
+                                                    brightness = (r + g + b) / 3
+                                                    expected_brightness = int(na * 0.8)
+                                                    if brightness != 0:
+                                                        scale_factor = expected_brightness / brightness
+                                                        new_r = min(255, int(r * scale_factor))
+                                                        new_g = min(255, int(g * scale_factor))
+                                                        new_b = min(255, int(b * scale_factor))
+                                                    else:
+                                                        new_r = new_g = new_b = expected_brightness
+                                                    pixels[nx, ny] = (new_r, new_g, new_b, na)
+                                                    has_alpha_issues = True
+                            
+                            # 如果有修复，保存文件
+                            if has_alpha_issues:
+                                img.save(png_path, 'PNG')
+                                fixed_count += 1
+                                log(f"修复了 alpha 图层问题: {os.path.relpath(png_path, temp_dir)}")
+                            
+                            # 关闭图像文件
+                            img.close()
+                            
+                        except Exception as e:
+                            log(f"处理文件 {png_path} 时出错: {e}")
+                        
+        log(f"全物品贴图图层修复完成，共处理 {total_count} 个文件，修复了 {fixed_count} 个文件")
+        
+    except Exception as e:
+        log(f"执行全物品贴图图层修复时出错: {e}")
+
 
 def fix_ui_survival(temp_dir):
     """
@@ -5455,7 +6305,7 @@ def fix_ui_survival(temp_dir):
                     # 检查尺寸是否匹配
                     if overlay_img.size != img.size:
                         log(f"Resizing '{inventory_size_file}' from {overlay_img.size} to {img.size}")
-                        overlay_img = overlay_img.resize(img.size, Image.ANTIALIAS)
+                        overlay_img = overlay_img.resize(img.size, Image.Resampling.NEAREST)
                     
                     # 将 overlay_img 叠加到 img 上
                     img = Image.alpha_composite(img, overlay_img)
@@ -7604,8 +8454,8 @@ def fix_smithing2_villager2_ui(temp_dir):
                     # 打开 anvil.png 并等比缩放到与 villager2_img 相同的尺寸
                     anvil_img = Image.open(anvil_path).convert("RGBA")
                     if anvil_img.size != villager2_img.size:
-                        anvil_img = anvil_img.resize(villager2_img.size, Image.Resampling.LANCZOS)
-                        log(f"Resized 'anvil.png' from {anvil_img.size} to {villager2_img.size}")
+                        anvil_img = anvil_img.resize(villager2_img.size, Image.Resampling.NEAREST)
+                        log(f"Resized 'anvil.png' from {anvil_img.size} to {villager2_img.size} using nearest neighbor")
 
                     # 定义源区域 (176,0)-(204,21) scaled
                     source_box = (
@@ -7929,8 +8779,8 @@ def reverse_fix_ui_survival(temp_dir):
                             effect_img = Image.open(effect_image_path).convert("RGBA")
                             # Resize the effect image if necessary
                             if effect_img.size != (image_width, image_height):
-                                log(f"Resizing '{effect_image}' from {effect_img.size} to ({image_width}, {image_height})")
-                                effect_img = effect_img.resize((image_width, image_height), Image.ANTIALIAS)
+                                    log(f"Resizing '{effect_image}' from {effect_img.size} to ({image_width}, {image_height})")
+                                    effect_img = effect_img.resize((image_width, image_height), Image.Resampling.NEAREST)
 
                             row = i // 8  # Determine the row (0, 1, or 2)
                             col = i % 8   # Determine the column (0 to 7)
@@ -8467,7 +9317,7 @@ def overlay_icons(temp_dir):
 
 # 定义 pack_format 顺序
 PACK_FORMAT_ORDER = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 18, 22, 32, 34, 42, 46, 55, 63, 64, 69, 75
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 18, 22, 32, 34, 42, 46, 55, 63, 64, 69, 75, 1000
 ]
 
 def new_pack_format_generate(temp_dir, pack_meta_path, target_pack_format):
@@ -8567,10 +9417,23 @@ def process_zip(temp_dir, original_file_path, pack_format1, pack_format2, progre
     """
     处理材质包转换的主要函数。
     """
+    import time
+    start_time = time.time()
+    
     # 获取版本顺序的索引
     try:
-        start_index = PACK_FORMAT_ORDER.index(pack_format1)
-        end_index = PACK_FORMAT_ORDER.index(pack_format2)
+        # 检查是否是Bedrock版转换（pack_format2=1000）
+        if pack_format2 == 1000:
+            # Bedrock版转换需要先转换到Java 1.21.11（pack_format=75）
+            start_index = PACK_FORMAT_ORDER.index(pack_format1)
+            # 找到Java 1.21.11对应的pack_format索引
+            java_1_21_11_format = 75
+            if java_1_21_11_format not in PACK_FORMAT_ORDER:
+                raise ValueError(f"不支持的Java 1.21.11 pack_format: {java_1_21_11_format}")
+            end_index = PACK_FORMAT_ORDER.index(java_1_21_11_format)
+        else:
+            start_index = PACK_FORMAT_ORDER.index(pack_format1)
+            end_index = PACK_FORMAT_ORDER.index(pack_format2)
     except ValueError:
         log(f"无效的 pack_format: {pack_format1} 或 {pack_format2}")
         raise ValueError(f"无效的 pack_format: {pack_format1} 或 {pack_format2}") from None
@@ -8726,9 +9589,33 @@ def process_zip(temp_dir, original_file_path, pack_format1, pack_format2, progre
         
         log(f"已生成转换后的材质包: {processed_zip_path}")
         
-        # 删除临时目录
-        shutil.rmtree(temp_dir)
-        log(f"已删除临时目录: {temp_dir}")
+        # 计算转换时间
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        log(f"转换完成，耗时: {elapsed_time:.2f} 秒")
+        
+        # 删除临时目录（带重试机制）
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                shutil.rmtree(temp_dir)
+                log(f"已删除临时目录: {temp_dir}")
+                break
+            except PermissionError as e:
+                retry_count += 1
+                if retry_count < max_retries:
+                    log(f"删除临时目录时权限被拒绝，重试 ({retry_count}/{max_retries}): {e}")
+                    time.sleep(0.5)  # 等待0.5秒后重试
+                else:
+                    log(f"警告: 无法删除临时目录（已重试{max_retries}次）: {temp_dir}")
+                    log(f"错误详情: {e}")
+                    # 不抛出错误，继续执行
+            except Exception as e:
+                log(f"警告: 删除临时目录时发生错误: {e}")
+                # 不抛出错误，继续执行
+                break
         
         # 更新进度为100%
         if progress_callback:
@@ -8774,6 +9661,53 @@ def main_menu():
     root.mainloop()
 
 
+def cleanup_residual_temp_dirs():
+    """
+    清理残留的临时目录
+    """
+    import tempfile
+    import shutil
+    import time
+    
+    temp_root = tempfile.gettempdir()
+    residual_dirs = []
+    
+    try:
+        for item in os.listdir(temp_root):
+            if item.startswith('mcpack_') and item.endswith('_temp'):
+                item_path = os.path.join(temp_root, item)
+                if os.path.isdir(item_path):
+                    residual_dirs.append(item_path)
+        
+        if residual_dirs:
+            log(f"发现 {len(residual_dirs)} 个残留的临时目录，开始清理...")
+            
+            for dir_path in residual_dirs:
+                max_retries = 3
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    try:
+                        shutil.rmtree(dir_path)
+                        log(f"已清理残留目录: {dir_path}")
+                        break
+                    except PermissionError:
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            time.sleep(0.5)
+                        else:
+                            log(f"无法清理残留目录（可能被占用）: {dir_path}")
+                    except Exception as e:
+                        log(f"清理残留目录时出错: {dir_path}, 错误: {e}")
+                        break
+        else:
+            log("没有发现残留的临时目录")
+            
+    except Exception as e:
+        log(f"清理残留目录时发生错误: {e}")
+
 # 示例主应用设置
 if __name__ == "__main__":
+    # 启动时清理残留的临时目录
+    cleanup_residual_temp_dirs()
     main_menu()
